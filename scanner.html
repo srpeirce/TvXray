@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>X-Ray Demo · Scanner</title>
+<style>
+  :root { --fg: #e6f4ff; --accent: #7fe3ff; --bg: #06111c; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 15px/1.4 system-ui, sans-serif; overflow: hidden; }
+  #ar { position: fixed; inset: 0; }
+  #hud { position: fixed; left: 0; right: 0; top: 0; padding: calc(10px + env(safe-area-inset-top, 0px)) 14px 10px; display: flex; gap: 10px; align-items: center;
+         background: linear-gradient(rgba(6,17,28,.85), rgba(6,17,28,0)); pointer-events: none; z-index: 5; }
+  #status { font-family: ui-monospace, monospace; font-size: 13px; letter-spacing: .04em; }
+  #dot { width: 10px; height: 10px; border-radius: 50%; background: #f6ad55; flex: none; }
+  #dot.ok { background: #48bb78; } #dot.lost { background: #fc8181; }
+  #controls { position: fixed; left: 0; right: 0; bottom: 0; padding: 12px 14px calc(14px + env(safe-area-inset-bottom, 0px)); display: flex; gap: 12px; align-items: center;
+              background: linear-gradient(rgba(6,17,28,0), rgba(6,17,28,.85)); z-index: 5; }
+  #controls label { font-size: 12px; opacity: .8; }
+  #opacity { flex: 1; accent-color: var(--accent); }
+  button { background: var(--accent); color: #06111c; border: 0; border-radius: 8px; padding: 8px 14px; font-weight: 600; font-size: 14px; }
+  button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  #intro { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 24px; text-align: center; z-index: 10; background: var(--bg); }
+  #intro h1 { margin: 0; font-size: 22px; } #intro p { margin: 0; max-width: 34ch; opacity: .85; }
+  #intro button { font-size: 17px; padding: 12px 24px; }
+  #bar { width: min(80vw, 320px); height: 6px; background: #1a2e44; border-radius: 3px; overflow: hidden; }
+  #bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  #err { color: #fc8181; font-family: ui-monospace, monospace; font-size: 12px; max-width: 90vw; word-break: break-word; }
+  /* hide MindAR's own overlays */
+  .mindar-ui-overlay { display: none !important; }
+</style>
+</head>
+<body>
+<div id="ar"></div>
+<div id="hud"><span id="dot"></span><span id="status">idle</span></div>
+<div id="controls">
+  <label for="opacity">X-ray</label>
+  <input id="opacity" type="range" min="0" max="1" step="0.01" value="1">
+  <button id="save" class="ghost" hidden>Save .mind</button>
+</div>
+
+<div id="intro">
+  <h1>Phone X-ray · prototype</h1>
+  <p>Put <b>display.html</b> fullscreen on the TV, then tap Start and point this phone at it. Move closer to zoom in on a bone.</p>
+  <button id="start">Start camera</button>
+  <div id="bar"><i></i></div>
+  <div id="err"></div>
+</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+  "mindar-image-three": "https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-three.prod.js",
+  "mindar-image": "https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image.prod.js"
+}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { MindARThree } from 'mindar-image-three';
+import { Compiler } from 'mindar-image';
+
+const TARGET_VERSION = 'v1';          // bump when target.png changes so the cached .mind is rebuilt
+const TARGET_ASPECT = 900 / 1600;     // h / w of target.png (xray.png must match)
+
+const $ = id => document.getElementById(id);
+const status = (t, cls) => { $('status').textContent = t; $('dot').className = cls || ''; };
+const progress = p => { $('bar').firstElementChild.style.width = Math.round(p) + '%'; };
+const fail = e => { console.error(e); $('err').textContent = String(e && e.message || e); };
+
+// ---- .mind target: precompiled file > IndexedDB cache > compile in browser ----
+const idb = {
+  open: () => new Promise((res, rej) => { const r = indexedDB.open('xray-proto', 1); r.onupgradeneeded = () => r.result.createObjectStore('kv'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }),
+  get: async k => { try { const db = await idb.open(); return await new Promise((res, rej) => { const r = db.transaction('kv').objectStore('kv').get(k); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); } catch { return undefined; } },
+  set: async (k, v) => { try { const db = await idb.open(); await new Promise((res, rej) => { const r = db.transaction('kv', 'readwrite').objectStore('kv').put(v, k); r.onsuccess = res; r.onerror = () => rej(r.error); }); } catch {} },
+};
+
+async function getTargetBuffer() {
+  // 1. a precompiled targets.mind next to this page
+  try { const r = await fetch('targets.mind', { cache: 'no-store' }); if (r.ok) { status('using targets.mind'); return await r.arrayBuffer(); } } catch {}
+  // 2. compiled earlier on this phone
+  const cached = await idb.get('mind-' + TARGET_VERSION);
+  if (cached) { status('using cached target'); return cached; }
+  // 3. compile now (10–40 s on a phone, once)
+  status('compiling target… (one-off)');
+  const img = new Image(); img.src = 'target.png';
+  await img.decode();
+  const compiler = new Compiler();
+  await compiler.compileImageTargets([img], progress);
+  const buf = await compiler.exportData();
+  await idb.set('mind-' + TARGET_VERSION, buf);
+  return buf;
+}
+
+async function run() {
+  $('start').disabled = true;
+  const buf = await getTargetBuffer();
+  $('save').hidden = false;
+  $('save').onclick = () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([buf])); a.download = 'targets.mind'; a.click(); };
+
+  status('starting camera…');
+  const mindar = new MindARThree({
+    container: $('ar'),
+    imageTargetSrc: URL.createObjectURL(new Blob([buf])),
+    uiLoading: 'no', uiScanning: 'no', uiError: 'no',
+    filterMinCF: 0.0005, filterBeta: 0.01,   // a bit smoother than default; raise beta if it lags
+  });
+  const { renderer, scene, camera } = mindar;
+  const anchor = mindar.addAnchor(0);
+
+  // The overlay: a plane exactly the size of the tracked target (width 1 unit in MindAR space).
+  const tex = new THREE.TextureLoader().load('xray.png');
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 1 });
+  const plane = new THREE.Mesh(new THREE.PlaneGeometry(1, TARGET_ASPECT), mat);
+  anchor.group.add(plane);
+
+  // Hook for later: this is where animation / layers / game state lives.
+  // e.g. swap mat.map between frames, or anchor.group.add(more meshes) at fixed offsets.
+
+  $('opacity').addEventListener('input', e => { mat.opacity = +e.target.value; });
+  anchor.onTargetFound = () => status('locked on', 'ok');
+  anchor.onTargetLost = () => status('lost — point at the screen', 'lost');
+
+  await mindar.start();
+  $('intro').remove();
+  status('scanning… point at the screen');
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+}
+
+$('start').onclick = () => run().catch(fail);
+</script>
+</body>
+</html>

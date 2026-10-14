@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>X-Ray Demo · Display</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  #stage { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+  #stage img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; user-select: none; -webkit-user-drag: none; }
+  #hint { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); color: #cbd5e0; font: 16px/1.4 system-ui, sans-serif;
+          background: rgba(0,0,0,.65); padding: 10px 16px; border-radius: 8px; pointer-events: none; transition: opacity .4s; }
+  body.fs #hint { opacity: 0; }
+  body.fs #stage { cursor: none; }
+</style>
+</head>
+<body>
+<div id="stage"><img id="pic" src="target.png" alt="Scan target"></div>
+<div id="hint">Click / tap for fullscreen · open <b>scanner.html</b> on your phone</div>
+<script>
+  const stage = document.getElementById('stage');
+  async function goFs() {
+    try {
+      if (!document.fullscreenElement) await document.documentElement.requestFullscreen();
+      else await document.exitFullscreen();
+    } catch (e) { /* some browsers refuse; fine */ }
+  }
+  stage.addEventListener('click', goFs);
+  document.addEventListener('fullscreenchange', () => document.body.classList.toggle('fs', !!document.fullscreenElement));
+  document.addEventListener('keydown', e => { if (e.key === 'f') goFs(); });
+</script>
+</body>
+</html>
